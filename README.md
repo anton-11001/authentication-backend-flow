@@ -1,77 +1,214 @@
-## The Registration Flow Abstraction
+# Authentication Backend Specification
 
-### 1. Request Ingestion & Input Guarding
-
-The system must immediately stop invalid data from entering the business logic layer.
-
-* **Presence & Type Integrity:** Verify that all required data primitives are present and match expected data types (e.g., verifying text inputs are actually text).
-* **Identity Format Validation:** Validate that the identifier intended for communication/routing conforms strictly to standard global addressing formats.
-* **Identity Normalization:** Standardize the unique identifier format (e.g., casing and whitespace) to ensure consistency and prevent duplicate records caused by format variations.
-* **Secret Complexity Enforcement:** Evaluate the secret credentials against a strict security policy. It must meet minimum entropy requirements, including length thresholds and character diversity rules, to resist brute-force vectors.
+This document outlines the standard API endpoints, required payloads, and internal logic required to build a secure user authentication system. **This specification is entirely technology-agnostic.**
 
 ---
 
-### 2. Identity Collision Check
+## 1. Architectural Assumptions
 
-Before proceeding with resource allocation, the system must ensure the entity does not already exist.
-
-* **Uniqueness Lookup:** Query the primary identity store using the normalized identifier.
-* **Collision Handling:** If a matching identity is found, immediately terminate the execution branch. Return a state indicating a resource conflict without exposing sensitive system details.
+* **Stateless or Stateful:** The flows below work whether you choose **JWTs (JSON Web Tokens)** or **Session Cookies**.
+* **Security:** All endpoints must be served over HTTPS. Passwords must *never* be stored in plain text (always use a strong cryptographic hashing function like bcrypt, Argon2, or PBKDF2 with a unique salt before saving to the database).
 
 ---
 
-### 3. Credential Securing
+## 2. Endpoint Reference Table
 
-Plaintext secrets must never be written to persistent storage or application logs.
-
-* **One-Way Cryptographic Transformation:** Pass the secret credential through a secure, non-reversible, computationally intensive mathematical function.
-* **Work Factor Utilization:** Ensure the transformation utilizes a salt value and an appropriate work factor to protect against rainbow table and pre-computation attacks.
-
----
-
-### 4. Verification State Generation
-
-An identity must remain unverified until the owner completes a proof-of-possession loop.
-
-* **Opaque Token Generation:** Create a high-entropy, cryptographically secure, unpredictable unique identifier.
-* **Lifecycle Binding:** Associate this token with the pending account state, ensuring it has a built-in expiration policy.
+| Method | Endpoint | Description | Auth Required |
+| --- | --- | --- | --- |
+| `POST` | `/api/auth/register` | Creates a new user account | No |
+| `POST` | `/api/auth/login` | Authenticates credentials and returns a token/session | No |
+| `POST` | `/api/auth/logout` | Invalidates the current user session/token | **Yes** |
+| `POST` | `/api/auth/forgot-password` | Generates a temporary reset token and sends it via email | No |
+| `POST` | `/api/auth/reset-password` | Verifies the reset token and updates the password | No |
+| `GET` | `/api/auth/me` | Returns the profile of the currently logged-in user | **Yes** |
 
 ---
 
-### 5. Persistence Phase
+## 3. Detailed Endpoint Flows
 
-Commit the initial state of the new system actor to the permanent data store.
+### 🔑 POST `/api/auth/register`
 
-* **Atomic Record Creation:** Save the new entity record containing the normalized identifier, the secured secret, the verification token, and an explicit lifecycle state flagging the account as "pending activation."
+Registers a new user in the system.
+
+* **Expected Input Payload:**
+* `email` (String, required, must be validated as a proper email format)
+* `password` (String, required, should enforce minimum strength requirements)
+* *Optional:* `name`, `username`, etc.
+
+
+* **Backend Logic:**
+1. Validate that the input fields are present and meet formatting rules.
+2. Query the database to check if the `email` already exists.
+* *If exists:* Return an error (`409 Conflict`).
+
+
+3. Hash the `password` using a secure hashing algorithm.
+4. Save the new user record (Email + Hashed Password) to the database.
+5. *Optional:* Generate an authentication token immediately, or require them to log in.
+
+
+* **Success Response (`201 Created`):**
+```json
+{
+  "success": true,
+  "message": "User registered successfully",
+  "user": { "id": "unique_user_id", "email": "user@example.com" }
+}
+
+```
+
+
 
 ---
 
-### 6. Outbound Verification Despatch
+### 🔓 POST `/api/auth/login`
 
-The system must notify the external entity to verify ownership of the communication channel.
+Authenticates a user and establishes a session.
 
-* **Asynchronous Execution:** Offload the communication dispatch to a background worker queue so the HTTP response cycle is not blocked.
-* **Secure URI Construction:** Build a single-use routing link embedding the unique verification token.
-* **Channel Transmission:** Deliver the link via the external communication network to the user’s registered address.
+* **Expected Input Payload:**
+* `email` (String, required)
+* `password` (String, required)
+
+
+* **Backend Logic:**
+1. Find the user record in the database by `email`.
+* *If not found:* Return a generic error (`401 Unauthorized`). *Note: Do not explicitly say "Email not found" for security reasons to prevent user enumeration.*
+
+
+2. Compare the incoming plain-text `password` against the stored `hashed password` using your hashing library's built-in verification function.
+* *If mismatch:* Return a generic error (`401 Unauthorized`).
+
+
+3. Generate the session mechanism:
+* **If using Tokens (JWT):** Generate an Access Token (short-lived) and optionally a Refresh Token (long-lived).
+* **If using Cookies:** Generate a session ID, store it in your cache/database, and set it in the response header as an `HttpOnly, Secure` cookie.
+
+
+
+
+* **Success Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "token": "access_token_string_here", 
+  "user": { "id": "unique_user_id", "email": "user@example.com" }
+}
+
+```
+
+
 
 ---
 
-### 7. Session Authorization & Token Issuance
+### 🔒 POST `/api/auth/logout`
 
-Establish an immediate, authenticated session for the user so they are logged in right after account creation.
+Terminates the user's active session.
 
-* **Short-Lived Authorization State:** Generate a highly volatile, cryptographically signed token containing the actor's identity and system privileges, designed for stateless API access.
-* **Long-Lived Session Lifecycle State:** Generate a separate, distinct token intended for session renewal.
-* **Session Persistence:** Log the renewal session signature in a central session store to allow for granular tracking, auditing, and manual revocation capabilities.
+* **Expected Input Payload:** None (Relies on the Auth Header or Cookie sent with the request).
+* **Backend Logic:**
+* **If using Cookies:** Clear the session cookie from the client's browser and delete the session ID from your backend store.
+* **If using Tokens:** (Optional but recommended) Add the current token to a "blacklist" database until its natural expiration time, or simply delete the Refresh Token from the database.
+
+
+* **Success Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "Logged out successfully"
+}
+
+```
+
+
 
 ---
 
-### 8. Response Packaging & Security Headers
+### 📧 POST `/api/auth/forgot-password`
 
-Finalize the network transaction by returning the necessary keys to the client using secure boundaries.
+Initiates the password recovery workflow.
 
-* **State Separation Delivery:** * Return the short-lived access token directly inside the structured application response body.
-* Inject the long-lived renewal token into the network transport layer headers using strict browser-isolation directives (preventing client-side execution access, enforcing encryption in transit, and restricting cross-site transmission behavior).
+* **Expected Input Payload:**
+* `email` (String, required)
 
 
-* **Success State Resolution:** Emit a standardized "Resource Created" HTTP status code alongside the payload.
+* **Backend Logic:**
+1. Look up the user by `email`.
+2. *Security Best Practice:* Regardless of whether the email exists or not, return a `200 OK` success message to prevent attackers from guessing registered emails.
+3. If the user *does* exist:
+* Generate a unique, random, short-lived **Reset Token** (e.g., valid for 15 minutes).
+* Hash and save this token in the database alongside an expiration timestamp tied to the user.
+* Trigger an external email service to send a link to the user (e.g., `https://frontend.com/reset-password?token=XYZ`).
+
+
+
+
+* **Success Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "If the email exists, a password reset link has been sent."
+}
+
+```
+
+
+
+---
+
+### 🔄 POST `/api/auth/reset-password`
+
+Consumes the reset token to update the user's password.
+
+* **Expected Input Payload:**
+* `token` (String, required)
+* `newPassword` (String, required)
+
+
+* **Backend Logic:**
+1. Find the user record associated with the provided `token`.
+2. Verify if the token has expired.
+* *If invalid or expired:* Return an error (`400 Bad Request`).
+
+
+3. Hash the `newPassword`.
+4. Update the user record with the new hashed password and **delete/invalidate** the reset token so it can't be reused.
+
+
+* **Success Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "Password updated successfully. You can now log in."
+}
+
+```
+
+
+
+---
+
+### 👤 GET `/api/auth/me`
+
+An example of a protected route. Fetches the current user's profile information.
+
+* **Expected Input Payload:** None (Requires active Auth Token/Session Cookie in request headers).
+* **Backend Logic (Middleware):**
+1. Intercept the request to read the Authorization header or cookie.
+2. Validate the session/token. If invalid, block the request and return `401 Unauthorized`.
+3. Extract the `user_id` from the valid token/session.
+4. Fetch the user details from the database using that ID.
+5. Return the profile data (excluding sensitive fields like the password hash).
+
+
+* **Success Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "user": {
+    "id": "unique_user_id",
+    "email": "user@example.com",
+    "createdAt": "timestamp"
+  }
+}
+
+```
