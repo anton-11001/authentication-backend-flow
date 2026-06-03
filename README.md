@@ -52,6 +52,7 @@ Registers a new user in the system.
 {
   "success": true,
   "message": "User registered successfully",
+  "token": "access_token_string_here", 
   "user": { "id": "unique_user_id", "email": "user@example.com" }
 }
 
